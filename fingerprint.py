@@ -31,11 +31,11 @@ from scipy.ndimage import maximum_filter
 SR        = 22050   # uniform resample rate (Hz)
 N_FFT     = 2048     # STFT window length
 HOP_LEN   = 512      # STFT hop length
-FAN_VALUE = 6        # max forward neighbours per anchor peak (kept low to
+FAN_VALUE = 4        # max forward neighbours per anchor peak (kept low to
                      # bound the hash-database size on memory-limited hosts
                      # like Streamlit Community Cloud's free tier)
 MIN_DT    = 1        # min Δt between anchor & target (frames)
-MAX_DT    = 100      # max Δt (also trimmed for the same reason)
+MAX_DT    = 60       # max Δt (also trimmed for the same reason)
 NBHD      = (20, 20) # (freq_bins, time_frames) neighbourhood for peak-picking
 THRESH_DB = -40      # dB threshold relative to spectrogram max
 
@@ -150,23 +150,32 @@ def generate_ratio_hashes(peaks, fan_value=FAN_VALUE, min_dt=MIN_DT, max_dt=MAX_
 
 
 def fingerprint_audio(y, sr=SR, n_fft=N_FFT, hop_length=HOP_LEN, nbhd=NBHD,
-                       thresh=THRESH_DB, fan=FAN_VALUE, min_dt=MIN_DT, max_dt=MAX_DT):
-    """Full pipeline for one clip: spectrogram -> peaks -> pair/single hashes."""
+                       thresh=THRESH_DB, fan=FAN_VALUE, min_dt=MIN_DT, max_dt=MAX_DT,
+                       compute_single=True):
+    """Full pipeline for one clip: spectrogram -> peaks -> pair/single hashes.
+
+    compute_single=False skips the (less useful, app-irrelevant) single-peak
+    hashes entirely, saving both CPU and memory -- used by the deployed app.
+    """
     S_db = compute_spectrogram(y, sr, n_fft, hop_length)
     peaks = extract_peaks(S_db, nbhd, thresh)
     pair_hashes = generate_pair_hashes(peaks, fan, min_dt, max_dt)
-    single_hashes = generate_single_hashes(peaks)
+    single_hashes = generate_single_hashes(peaks) if compute_single else []
     return S_db, peaks, pair_hashes, single_hashes
 
 
 # ----------------------------------------------------------------------------
 # Database build / persist
 # ----------------------------------------------------------------------------
-def build_database(song_dir=None, song_files=None, sr=SR, verbose=True, **kw):
+def build_database(song_dir=None, song_files=None, sr=SR, verbose=True,
+                    compute_single=True, **kw):
     """
-    Fingerprint every song and populate two lookup tables:
+    Fingerprint every song and populate the lookup table(s):
       db_pair[hash]   -> [(song_name, anchor_time_frame), ...]
-      db_single[hash] -> [(song_name, anchor_time_frame), ...]
+      db_single[hash] -> [(song_name, anchor_time_frame), ...]  (only if
+                          compute_single=True; the deployed app sets this to
+                          False since it only needs pair-hash matching, which
+                          roughly cuts the resident database size by a fifth)
     """
     if song_files is None:
         song_dir = song_dir or find_song_dir()
@@ -180,7 +189,7 @@ def build_database(song_dir=None, song_files=None, sr=SR, verbose=True, **kw):
         if verbose:
             print(f"  indexing {name!r} ...", end=" ", flush=True)
         y, _ = librosa.load(path, sr=sr, mono=True)
-        S_db, peaks, ph, sh = fingerprint_audio(y, sr, **kw)
+        S_db, peaks, ph, sh = fingerprint_audio(y, sr, compute_single=compute_single, **kw)
         for h, t in ph:
             db_p[h].append((name, t))
         for h, t in sh:
@@ -196,7 +205,12 @@ def build_database(song_dir=None, song_files=None, sr=SR, verbose=True, **kw):
         # keeps peak memory bounded to ~one song at a time on low-RAM hosts
         del y, S_db, peaks, ph, sh
         gc.collect()
-    return dict(db_p), dict(db_s), stats
+
+    # Turn the defaultdicts into plain dicts in-place (no copy) so we don't
+    # transiently double the hash-table memory at the end of indexing.
+    db_p.default_factory = None
+    db_s.default_factory = None
+    return db_p, db_s, stats
 
 
 def save_database(path, db_p, db_s, stats, song_files):
@@ -221,8 +235,11 @@ def match_clip(y_clip, sr=SR, db_p=None, db_s=None, **kw):
 
     Returns a dict with the winning song for pair-hash and single-hash
     methods, their score dicts, the full offset histograms (for plotting),
-    the query's peaks, and its spectrogram.
+    the query's peaks, and its spectrogram. If db_s is None/empty, the
+    single-hash pass is skipped entirely (saves work when the database was
+    built with compute_single=False).
     """
+    kw.setdefault("compute_single", bool(db_s))
     S_q, peaks_q, ph_q, sh_q = fingerprint_audio(y_clip, sr, **kw)
 
     off_p = defaultdict(lambda: defaultdict(int))

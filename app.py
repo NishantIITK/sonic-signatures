@@ -12,6 +12,7 @@ Run locally:    streamlit run app.py
 Deploy:         see README_DEPLOY.md
 """
 
+import gc
 import os
 import tempfile
 
@@ -27,6 +28,13 @@ from fingerprint import (
     match_clip,
 )
 
+# Memory housekeeping: only the pair-hash database is used by this app (the
+# single-peak comparison lives in the Q3A report/notebook, not the app), and
+# we process one query clip fully before moving to the next so peak memory
+# stays bounded to ~one song/clip at a time -- this is what keeps both modes
+# inside Streamlit Community Cloud's free-tier memory limit.
+BATCH_GC_EVERY = 5  # force a garbage-collection pass every N batch files
+
 st.set_page_config(page_title="Sonic Signatures — Mini Shazam", layout="wide")
 st.title("Sonic Signatures — Mini Music Identifier")
 st.caption("EE200 Course Project — Q3B: Signals to Softwares")
@@ -38,14 +46,24 @@ SONG_DIR = "songs"
 @st.cache_resource(show_spinner="Loading / building the song database...")
 def get_database():
     """Load a pre-built fingerprints.pkl if it ships with the app; otherwise
-    build it once from the songs/ folder and cache it for next time."""
+    build it once from the songs/ folder and cache it for next time.
+
+    compute_single=False: the app only ever needs the pair-hash database for
+    matching (the single-vs-pair comparison is a report/notebook thing, not
+    an app feature), so we never even build the single-hash table here --
+    that alone removes roughly a fifth of the resident memory.
+    """
     if os.path.exists(DB_PATH):
-        return load_database(DB_PATH)
-    song_files = list_audio_files(SONG_DIR)
-    if not song_files:
-        return None
-    db_p, db_s, stats = build_database(song_files=song_files, verbose=False)
-    save_database(DB_PATH, db_p, db_s, stats, song_files)
+        db_p, db_s, stats, song_files = load_database(DB_PATH)
+    else:
+        song_files = list_audio_files(SONG_DIR)
+        if not song_files:
+            return None
+        db_p, db_s, stats = build_database(
+            song_files=song_files, verbose=False, compute_single=False
+        )
+        save_database(DB_PATH, db_p, db_s, stats, song_files)
+    gc.collect()
     return db_p, db_s, stats, song_files
 
 
@@ -115,6 +133,14 @@ def fig_offsets(offsets, scores, title, top=4):
     return fig
 
 
+def show_and_close(fig):
+    """st.pyplot keeps no reference, but matplotlib's global figure manager
+    does -- close explicitly so repeated uploads in one session don't leak
+    memory figure by figure."""
+    st.pyplot(fig)
+    plt.close(fig)
+
+
 tab_single, tab_batch = st.tabs(["Single-clip mode", "Batch mode"])
 
 with tab_single:
@@ -126,30 +152,28 @@ with tab_single:
         y = load_audio_from_upload(uploaded)
         with st.spinner("Fingerprinting and matching..."):
             res = match_clip(y, SR, db_p, db_s)
+        del y
 
         pair_name = res["pair_match"] or "No match found"
         pair_score = res["pair_scores"].get(res["pair_match"], 0)
-        single_name = res["single_match"] or "No match found"
-        single_score = res["single_scores"].get(res["single_match"], 0)
 
-        st.success(f"Identified song (pair-hash method): **{pair_name}**")
-        st.caption(
-            f"Pair-hash peak score: {pair_score}  |  "
-            f"Single-peak method guessed: {single_name} (score {single_score})"
-        )
+        st.success(f"Identified song: **{pair_name}**")
+        st.caption(f"Pair-hash peak score: {pair_score}")
 
         c1, c2 = st.columns(2)
         with c1:
-            st.pyplot(fig_spectrogram(res["S_db"], "Query spectrogram"))
+            show_and_close(fig_spectrogram(res["S_db"], "Query spectrogram"))
         with c2:
-            st.pyplot(fig_constellation(res["S_db"], res["peaks"], "Query constellation"))
+            show_and_close(fig_constellation(res["S_db"], res["peaks"], "Query constellation"))
 
         if res["pair_offsets"]:
-            st.pyplot(
+            show_and_close(
                 fig_offsets(res["pair_offsets"], res["pair_scores"], "Offset histogram (pair hashes)")
             )
         else:
             st.info("No pair-hash matches found against the database.")
+        del res
+        gc.collect()
 
 with tab_batch:
     st.subheader("Identify many query clips at once")
@@ -160,6 +184,10 @@ with tab_batch:
         key="batch_uploader",
     )
     if files:
+        st.caption(
+            f"{len(files)} file(s) queued. Each clip is fully processed and "
+            f"freed before the next one starts to keep memory bounded."
+        )
         rows = []
         progress = st.progress(0.0)
         for i, f in enumerate(files):
@@ -168,6 +196,10 @@ with tab_batch:
             prediction = res["pair_match"] or ""
             rows.append({"filename": f.name, "prediction": prediction})
             progress.progress((i + 1) / len(files))
+            del y, res
+            if (i + 1) % BATCH_GC_EVERY == 0:
+                gc.collect()
+        gc.collect()
 
         results_df = pd.DataFrame(rows, columns=["filename", "prediction"])
         st.dataframe(results_df, use_container_width=True)
