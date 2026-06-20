@@ -17,6 +17,7 @@ audio -> spectrogram -> constellation (peaks) -> pair hashes (f1, f2, dt)
 
 import os
 import glob
+import gc
 import pickle
 from collections import defaultdict
 
@@ -30,9 +31,11 @@ from scipy.ndimage import maximum_filter
 SR        = 22050   # uniform resample rate (Hz)
 N_FFT     = 2048     # STFT window length
 HOP_LEN   = 512      # STFT hop length
-FAN_VALUE = 15       # max forward neighbours per anchor peak
+FAN_VALUE = 6        # max forward neighbours per anchor peak (kept low to
+                     # bound the hash-database size on memory-limited hosts
+                     # like Streamlit Community Cloud's free tier)
 MIN_DT    = 1        # min Δt between anchor & target (frames)
-MAX_DT    = 200      # max Δt
+MAX_DT    = 100      # max Δt (also trimmed for the same reason)
 NBHD      = (20, 20) # (freq_bins, time_frames) neighbourhood for peak-picking
 THRESH_DB = -40      # dB threshold relative to spectrogram max
 
@@ -177,7 +180,7 @@ def build_database(song_dir=None, song_files=None, sr=SR, verbose=True, **kw):
         if verbose:
             print(f"  indexing {name!r} ...", end=" ", flush=True)
         y, _ = librosa.load(path, sr=sr, mono=True)
-        _, peaks, ph, sh = fingerprint_audio(y, sr, **kw)
+        S_db, peaks, ph, sh = fingerprint_audio(y, sr, **kw)
         for h, t in ph:
             db_p[h].append((name, t))
         for h, t in sh:
@@ -189,6 +192,10 @@ def build_database(song_dir=None, song_files=None, sr=SR, verbose=True, **kw):
         }
         if verbose:
             print(f"{len(peaks):,} peaks, {len(ph):,} pair-hashes")
+        # free the per-song audio array and spectrogram before the next song;
+        # keeps peak memory bounded to ~one song at a time on low-RAM hosts
+        del y, S_db, peaks, ph, sh
+        gc.collect()
     return dict(db_p), dict(db_s), stats
 
 
