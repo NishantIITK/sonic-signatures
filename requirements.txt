@@ -1,4 +1,5 @@
 streamlit>=1.30
+gradio>=4.40
 numpy
 scipy
 matplotlib

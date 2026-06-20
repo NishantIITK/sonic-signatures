@@ -1,14 +1,58 @@
-# Deploying the Q3B app (Streamlit Community Cloud)
+# Deploying the Q3B app
+
+Two deployable apps live in this repo, sharing the same `fingerprint.py`
+engine and the same `songs/` library, so you can pick whichever host treats
+you better:
+
+- **`app.py`** (Streamlit) → deploy on Streamlit Community Cloud. Free tier
+  caps memory around ~1 GB, which this project sits close to even after
+  tuning — see the memory notes below if it crashes.
+- **`gradio_app.py`** (Gradio) → deploy on **Hugging Face Spaces** instead.
+  Its free CPU tier gives roughly 16 GB RAM for a Gradio Space, which this
+  project is nowhere near, so it's the more robust option if Streamlit Cloud
+  keeps crashing on batch mode.
+
+Both implement the same two required modes (single-clip with spectrogram /
+constellation / offset histogram / matched name, and batch with a
+`results.csv` of `filename,prediction`). Pick one for your report link —
+you don't need to deploy both.
 
 ## Files
 
-- `fingerprint.py` — the fingerprinting engine (shared with the Kaggle notebook).
-- `app.py` — the Streamlit app (single-clip mode + batch mode).
+- `fingerprint.py` — the fingerprinting engine (shared by everything below).
+- `app.py` — the Streamlit app.
+- `gradio_app.py` — the Gradio app (for Hugging Face Spaces).
 - `build_database.py` — optional, only needed for the Git LFS path below.
 - `requirements.txt`, `apt.txt` — dependencies (`apt.txt` installs `ffmpeg` so
-  Streamlit Cloud's minimal Linux image can decode `.mp3`).
+  the host's minimal Linux image can decode `.mp3`).
 - `songs/` — the 50 course mp3 files (unrenamed).
 - `.gitignore` — keeps `fingerprints.pkl` and caches out of git.
+- `README.md` — Hugging Face Space metadata (the YAML header at the top)
+  plus a short project blurb; this is also what GitHub shows as the repo's
+  front page.
+
+## Option 2: Hugging Face Spaces (Gradio) — recommended if Streamlit keeps crashing
+
+1. Go to [huggingface.co/new-space](https://huggingface.co/new-space),
+   create a Space, choose **Gradio** as the SDK. Note the Space's git URL,
+   e.g. `https://huggingface.co/spaces/<username>/<space-name>`.
+2. On your Mac, open Terminal in `~/Documents/sonic-signatures` (this is
+   already a git repo with everything committed) and run:
+   ```
+   git remote add space https://huggingface.co/spaces/<username>/<space-name>
+   git push space main
+   ```
+   When prompted for a password, use a Hugging Face **access token**
+   (Settings → Access Tokens → create one with write access), not your
+   account password.
+3. The Space builds automatically (it reads the YAML header in `README.md`
+   to know `sdk: gradio` and `app_file: gradio_app.py`). First load indexes
+   the 50 songs once (~1–3 min), same as the Streamlit version, then it's
+   instant.
+4. Test both tabs on the Space's URL, then put that URL (and the GitHub repo
+   URL) in your report.
+
+## Option 1: Streamlit Community Cloud
 
 ## Important: do NOT commit fingerprints.pkl
 
